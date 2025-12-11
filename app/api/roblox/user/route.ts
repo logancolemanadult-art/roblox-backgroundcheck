@@ -1,181 +1,245 @@
+// @ts-nocheck
 import { NextResponse } from "next/server";
 
-type FriendEntry = { id: number; username: string };
-type GroupEntry = { id: number; name: string; role: string };
-type BadgeEntry = { id: number; name: string };
-
 export async function GET(req: Request) {
-  const { searchParams } = new URL(req.url);
-  const idParam = searchParams.get("id");
-
-  if (!idParam) {
-    return NextResponse.json({ error: "Missing id" }, { status: 400 });
-  }
-
-  const userId = Number(idParam.trim());
-  if (!Number.isFinite(userId) || userId <= 0) {
-    return NextResponse.json({ error: "Invalid id" }, { status: 400 });
-  }
-
   try {
-    /* ---------------- Basic profile ---------------- */
-    const profileRes = await fetch(`https://users.roblox.com/v1/users/${userId}`);
-    if (!profileRes.ok) {
-      return NextResponse.json({ error: "User not found" }, { status: 404 });
+    const { searchParams } = new URL(req.url);
+    const idParam = searchParams.get("id");
+
+    if (!idParam) {
+      return NextResponse.json(
+        { error: "Missing 'id' query parameter" },
+        { status: 400 }
+      );
     }
-    const profile = await profileRes.json();
 
-    /* ---------------- Avatar ---------------- */
-    const thumbRes = await fetch(
-      `https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds=${userId}&size=420x420&format=Png&isCircular=false`
+    const userId = Number(idParam);
+    if (!Number.isFinite(userId)) {
+      return NextResponse.json(
+        { error: "Invalid 'id' query parameter" },
+        { status: 400 }
+      );
+    }
+
+    //
+    // 1) Basic user profile
+    //
+    const userRes = await fetch(
+      `https://users.roblox.com/v1/users/${userId}`,
+      { cache: "no-store" }
     );
-    const thumbJson = await thumbRes.json();
-    const avatarUrl: string | null = thumbJson?.data?.[0]?.imageUrl ?? null;
+    if (!userRes.ok) {
+      return NextResponse.json(
+        { error: "Failed to fetch Roblox user" },
+        { status: userRes.status }
+      );
+    }
+    const user = await userRes.json();
 
-    /* ---------------- Social counts ---------------- */
-    const [friendsCountRes, followersCountRes, followingCountRes] =
-      await Promise.all([
-        fetch(`https://friends.roblox.com/v1/users/${userId}/friends/count`),
-        fetch(`https://friends.roblox.com/v1/users/${userId}/followers/count`),
-        fetch(`https://friends.roblox.com/v1/users/${userId}/followings/count`),
-      ]);
+    //
+    // 2) Avatar
+    //
+    let avatarUrl: string | null = null;
+    try {
+      const avatarRes = await fetch(
+        `https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds=${userId}&size=150x150&format=Png&isCircular=false`,
+        { cache: "no-store" }
+      );
+      if (avatarRes.ok) {
+        const avatarJson = await avatarRes.json();
+        if (avatarJson?.data && avatarJson.data.length > 0) {
+          avatarUrl = avatarJson.data[0].imageUrl ?? null;
+        }
+      }
+    } catch {
+      avatarUrl = null;
+    }
 
-    const friendsCount =
-      friendsCountRes.ok ? (await friendsCountRes.json()).count : 0;
-    const followersCount =
-      followersCountRes.ok ? (await followersCountRes.json()).count : 0;
-    const followingCount =
-      followingCountRes.ok ? (await followingCountRes.json()).count : 0;
+    //
+    // 3) Friends (full list, paginated)
+    //
+    const friends: {
+      id: number;
+      username: string;
+      displayName: string;
+    }[] = [];
+    let friendsCursor: string | null = null;
 
-    /* ---------------- ALL Friends (paginated + resolve usernames) ---------------- */
-const friendIds: number[] = [];
-let friendsCursor: string | null = null;
+    while (true) {
+      const baseUrl = `https://friends.roblox.com/v1/users/${userId}/friends?limit=200&sortOrder=Asc`;
+      const friendsUrl = friendsCursor
+        ? `${baseUrl}&cursor=${friendsCursor}`
+        : baseUrl;
 
-// Step 1: collect every friend ID
-while (true) {
-  const url =
-    `https://friends.roblox.com/v1/users/${userId}/friends?limit=100&sortOrder=Asc` +
-    (friendsCursor ? `&cursor=${friendsCursor}` : "");
+      const res = await fetch(friendsUrl, { cache: "no-store" });
+      if (!res.ok) break;
 
-  const res = await fetch(url);
-  if (!res.ok) break;
+      const json = await res.json();
 
-  const json = await res.json();
+      const pageFriends =
+        json?.data?.map((f: any) => ({
+          id: Number(f.id),
+          username: String(f.name),
+          displayName: String(f.displayName ?? f.name ?? ""),
+        })) ?? [];
 
-  const idsOnPage: number[] =
-    json.data?.map((f: any) => Number(f.id)).filter(Boolean) ?? [];
+      friends.push(...pageFriends);
 
-  friendIds.push(...idsOnPage);
+      friendsCursor = json?.nextPageCursor ?? null;
+      if (!friendsCursor) break;
+    }
 
-  friendsCursor = json.nextPageCursor ?? null;
-  if (!friendsCursor) break;
-}
+    const friendsCount = friends.length;
 
-// Step 2: batch lookup usernames for those IDs
-const friends: FriendEntry[] = [];
+    //
+    // 4) Followers / following counts (best effort)
+    //
+    let followersCount = 0;
+    let followingCount = 0;
+    try {
+      const followersRes = await fetch(
+        `https://friends.roblox.com/v1/users/${userId}/followers/count`,
+        { cache: "no-store" }
+      );
+      if (followersRes.ok) {
+        const j = await followersRes.json();
+        followersCount = Number(j?.count ?? 0);
+      }
+    } catch {}
 
-for (let i = 0; i < friendIds.length; i += 100) {
-  const chunk = friendIds.slice(i, i + 100);
+    try {
+      const followingRes = await fetch(
+        `https://friends.roblox.com/v1/users/${userId}/followings/count`,
+        { cache: "no-store" }
+      );
+      if (followingRes.ok) {
+        const j = await followingRes.json();
+        followingCount = Number(j?.count ?? 0);
+      }
+    } catch {}
 
-  const lookupRes = await fetch(`https://users.roblox.com/v1/users`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ userIds: chunk, excludeBannedUsers: false }),
-  });
+    //
+    // 5) Groups
+    //
+    const groups: { id: number; name: string; role: string }[] = [];
+    try {
+      const groupsRes = await fetch(
+        `https://groups.roblox.com/v2/users/${userId}/groups/roles`,
+        { cache: "no-store" }
+      );
+      if (groupsRes.ok) {
+        const groupsJson = await groupsRes.json();
+        const pageGroups =
+          groupsJson?.data?.map((g: any) => ({
+            id: Number(g.group?.id),
+            name: String(g.group?.name ?? ""),
+            role: String(g.role?.name ?? ""),
+          })) ?? [];
+        groups.push(...pageGroups);
+      }
+    } catch {}
 
-  if (!lookupRes.ok) continue;
+    const groupsCount = groups.length;
 
-  const lookupJson = await lookupRes.json();
-
-  const mapped: FriendEntry[] =
-    lookupJson.data?.map((u: any) => ({
-      id: u.id,
-      username: u.name, // ✅ guaranteed username
-    })) ?? [];
-
-  friends.push(...mapped);
-}
-
-    /* ---------------- Groups ---------------- */
-    const groupsRes = await fetch(
-      `https://groups.roblox.com/v2/users/${userId}/groups/roles`
-    );
-    const groupsJson = groupsRes.ok ? await groupsRes.json() : { data: [] };
-
-    const groups: GroupEntry[] =
-      groupsJson.data?.map((g: any) => ({
-        id: g.group.id,
-        name: g.group.name,
-        role: g.role.name,
-      })) ?? [];
-
-    /* ---------------- ALL Badges (paginated) ---------------- */
-    const badges: BadgeEntry[] = [];
+    //
+    // 6) Badges (paginated)
+    //
+    const badges: { id: number; name: string }[] = [];
     let badgesCursor: string | null = null;
     let totalBadges = 0;
 
     while (true) {
-      const url =
-        `https://badges.roblox.com/v1/users/${userId}/badges?limit=100&sortOrder=Desc` +
-        (badgesCursor ? `&cursor=${badgesCursor}` : "");
+      const baseUrl = `https://badges.roblox.com/v1/users/${userId}/badges?limit=100&sortOrder=Desc`;
+      const badgesUrl = badgesCursor
+        ? `${baseUrl}&cursor=${badgesCursor}`
+        : baseUrl;
 
-      const res = await fetch(url);
+      const res = await fetch(badgesUrl, { cache: "no-store" });
       if (!res.ok) break;
 
       const json = await res.json();
-      const pageBadges: BadgeEntry[] =
-        json.data?.map((b: any) => ({
-          id: b.id,
-          name: b.name,
+
+      const pageBadges =
+        json?.data?.map((b: any) => ({
+          id: Number(b.id),
+          name: String(b.name ?? ""),
         })) ?? [];
 
       badges.push(...pageBadges);
 
-      if (typeof json.total === "number") totalBadges = json.total;
+      if (typeof json?.total === "number") {
+        totalBadges = Number(json.total);
+      }
 
-      badgesCursor = json.nextPageCursor ?? null;
+      badgesCursor = json?.nextPageCursor ?? null;
       if (!badgesCursor) break;
     }
 
-    // ✅ Fallback if Roblox didn't send total
-if (!totalBadges) totalBadges = badges.length;
+    if (!totalBadges) {
+      totalBadges = badges.length;
+    }
 
+    //
+    // 7) Username history (best effort, paginated)
+    //
+    const usernameHistory: { name: string; created: string | null }[] = [];
+    let namesCursor: string | null = null;
 
-    /* ---------------- Username history ---------------- */
-    const nameHistRes = await fetch(
-      `https://users.roblox.com/v1/users/${userId}/username-history?limit=100&sortOrder=Desc`
+    while (true) {
+      const baseUrl = `https://users.roblox.com/v1/users/${userId}/username-history?limit=50&sortOrder=Desc`;
+      const namesUrl = namesCursor
+        ? `${baseUrl}&cursor=${namesCursor}`
+        : baseUrl;
+
+      const res = await fetch(namesUrl, { cache: "no-store" });
+      if (!res.ok) break;
+
+      const json = await res.json();
+
+      const pageNames =
+        json?.data?.map((n: any) => ({
+          name: String(n.name ?? ""),
+          created: n.created ? String(n.created) : null,
+        })) ?? [];
+
+      usernameHistory.push(...pageNames);
+
+      namesCursor = json?.nextPageCursor ?? null;
+      if (!namesCursor) break;
+    }
+
+    //
+    // Build the payload your frontend expects
+    //
+    const profile = {
+      userId: Number(user.id),
+      username: String(user.name),
+      displayName: String(user.displayName ?? user.name ?? ""),
+      description: String(user.description ?? ""),
+      created: String(user.created ?? ""),
+      isBanned: Boolean(user.isBanned),
+      avatarUrl,
+      friendsCount,
+      followersCount,
+      followingCount,
+      groupsCount,
+      totalBadges,
+    };
+
+    const payload = {
+      profile,
+      friends,
+      groups,
+      badges,
+      usernameHistory,
+    };
+
+    return NextResponse.json(payload, { status: 200 });
+  } catch (err) {
+    console.error("Roblox user API error:", err);
+    return NextResponse.json(
+      { error: "Failed to fetch Roblox user data" },
+      { status: 500 }
     );
-    const nameHistJson = nameHistRes.ok
-      ? await nameHistRes.json()
-      : { data: [] };
-
-    const usernameHistory: string[] =
-      nameHistJson.data?.map((n: any) => n.name) ?? [];
-
-    /* ---------------- Final response ---------------- */
-    return NextResponse.json({
-      profile: {
-        userId: profile.id,
-        username: profile.name,
-        displayName: profile.displayName,
-        description: profile.description,
-        created: profile.created,
-        isBanned: profile.isBanned,
-        avatarUrl,
-
-        friendsCount,
-        followersCount,
-        followingCount,
-        friends,          // ✅ full friends list
-
-        groups,
-        badges,           // ✅ full badges list
-        totalBadges,      // ✅ real total
-
-        usernameHistory,
-      },
-    });
-  } catch {
-    return NextResponse.json({ error: "Roblox API error" }, { status: 500 });
   }
 }
