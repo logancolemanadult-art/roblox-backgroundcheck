@@ -1,6 +1,114 @@
 // @ts-nocheck
 import { NextResponse } from "next/server";
 
+function daysSince(isoDate: string): number {
+  const created = new Date(isoDate).getTime();
+  const now = Date.now();
+  if (!created || Number.isNaN(created)) return 0;
+  return Math.floor((now - created) / (1000 * 60 * 60 * 24));
+}
+
+type RiskLevel = "Low" | "Medium" | "High";
+
+function computeRisk(params: {
+  createdISO: string;
+  friendsCount: number;
+  groupsCount: number;
+  badgesCount: number;
+}) {
+  const ageDays = daysSince(params.createdISO);
+
+  // Your thresholds
+  const REQ = {
+    ageDays: 60,
+    badges: 300,
+    friends: 20,
+    groups: 10,
+  };
+
+  const factors: string[] = [];
+  const warnings: string[] = [];
+
+  // “Gap points” system:
+  // 0 = meets requirement
+  // 1 = slightly under
+  // 2 = clearly under
+  // 3 = very under
+  let score = 0;
+
+  // Account age scoring
+  if (ageDays >= REQ.ageDays) {
+    // ok
+  } else if (ageDays >= 50) {
+    score += 1;
+    factors.push(`Account age is under ${REQ.ageDays} days (${ageDays}d).`);
+  } else if (ageDays >= 30) {
+    score += 2;
+    factors.push(`Account age is low (${ageDays}d).`);
+  } else {
+    score += 3;
+    factors.push(`Account age is very low (${ageDays}d).`);
+  }
+
+  // Badges scoring
+  if (params.badgesCount >= REQ.badges) {
+    // ok
+  } else if (params.badgesCount >= 250) {
+    score += 1;
+    factors.push(`Badges are slightly under ${REQ.badges} (${params.badgesCount}).`);
+  } else if (params.badgesCount >= 150) {
+    score += 2;
+    factors.push(`Badges are low (${params.badgesCount}).`);
+  } else {
+    score += 3;
+    factors.push(`Badges are very low (${params.badgesCount}).`);
+  }
+
+  // Friends scoring
+  if (params.friendsCount >= REQ.friends) {
+    // ok
+  } else if (params.friendsCount >= 15) {
+    score += 1;
+    factors.push(`Friends are slightly under ${REQ.friends} (${params.friendsCount}).`);
+  } else if (params.friendsCount >= 8) {
+    score += 2;
+    factors.push(`Friends are low (${params.friendsCount}).`);
+  } else {
+    score += 3;
+    factors.push(`Friends are very low (${params.friendsCount}).`);
+  }
+
+  // Groups scoring
+  if (params.groupsCount >= REQ.groups) {
+    // ok
+  } else if (params.groupsCount >= 8) {
+    score += 1;
+    factors.push(`Groups are slightly under ${REQ.groups} (${params.groupsCount}).`);
+  } else if (params.groupsCount >= 4) {
+    score += 2;
+    factors.push(`Groups are low (${params.groupsCount}).`);
+  } else {
+    score += 3;
+    factors.push(`Groups are very low (${params.groupsCount}).`);
+  }
+
+  // Convert score -> level (simple + consistent)
+  let level: RiskLevel = "Low";
+  if (score >= 8) level = "High";
+  else if (score >= 3) level = "Medium";
+
+  // Extra warnings (optional)
+  if (ageDays === 0) warnings.push("Could not determine account age (missing/invalid created date).");
+
+  return {
+    level,
+    score,
+    factors,
+    warnings,
+    ageDays,
+  };
+}
+
 export async function GET(req: Request) {
   try {
     const { searchParams } = new URL(req.url);
