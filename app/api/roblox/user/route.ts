@@ -1,6 +1,12 @@
 // @ts-nocheck
 import { NextResponse } from "next/server";
 
+function chunk<T>(arr: T[], size: number) {
+  const out: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
+
 export async function GET(req: Request) {
   try {
     const { searchParams } = new URL(req.url);
@@ -14,7 +20,7 @@ export async function GET(req: Request) {
     }
 
     const userId = Number(idParam);
-    if (!Number.isFinite(userId)) {
+    if (!Number.isFinite(userId) || userId <= 0) {
       return NextResponse.json(
         { error: "Invalid 'id' query parameter" },
         { status: 400 }
@@ -24,16 +30,17 @@ export async function GET(req: Request) {
     //
     // 1) Basic user profile
     //
-    const userRes = await fetch(
-      `https://users.roblox.com/v1/users/${userId}`,
-      { cache: "no-store" }
-    );
+    const userRes = await fetch(`https://users.roblox.com/v1/users/${userId}`, {
+      cache: "no-store",
+    });
+
     if (!userRes.ok) {
       return NextResponse.json(
         { error: "Failed to fetch Roblox user" },
         { status: userRes.status }
       );
     }
+
     const user = await userRes.json();
 
     //
@@ -47,28 +54,22 @@ export async function GET(req: Request) {
       );
       if (avatarRes.ok) {
         const avatarJson = await avatarRes.json();
-        if (avatarJson?.data && avatarJson.data.length > 0) {
-          avatarUrl = avatarJson.data[0].imageUrl ?? null;
-        }
+        avatarUrl = avatarJson?.data?.[0]?.imageUrl ?? null;
       }
     } catch {
       avatarUrl = null;
     }
 
     //
-    // 3) Friends (full list, paginated)
+    // 3) Friends (paginated) — collect IDs first
     //
-    const friends: {
-      id: number;
-      username: string;
-      displayName: string;
-    }[] = [];
+    const rawFriends: { id: number; name?: string; displayName?: string }[] = [];
     let friendsCursor: string | null = null;
 
     while (true) {
       const baseUrl = `https://friends.roblox.com/v1/users/${userId}/friends?limit=200&sortOrder=Asc`;
       const friendsUrl = friendsCursor
-        ? `${baseUrl}&cursor=${friendsCursor}`
+        ? `${baseUrl}&cursor=${encodeURIComponent(friendsCursor)}`
         : baseUrl;
 
       const res = await fetch(friendsUrl, { cache: "no-store" });
@@ -76,26 +77,61 @@ export async function GET(req: Request) {
 
       const json = await res.json();
 
-      const pageFriends =
+      const page =
         json?.data?.map((f: any) => ({
           id: Number(f.id),
-          username: String(f.name),
-          displayName: String(f.displayName ?? f.name ?? ""),
+          name: f.name ? String(f.name) : "",
+          displayName: f.displayName ? String(f.displayName) : "",
         })) ?? [];
 
-      friends.push(...pageFriends);
+      rawFriends.push(...page);
 
       friendsCursor = json?.nextPageCursor ?? null;
       if (!friendsCursor) break;
     }
 
-    const friendsCount = friends.length;
+    const friendIds = rawFriends.map((f) => f.id).filter(Boolean);
+    const friendsCount = friendIds.length;
+
+    //
+    // 3b) Bulk resolve friend usernames/display names (fixes "Unknown")
+    //
+    const idToUser = new Map<number, { username: string; displayName: string }>();
+
+    try {
+      for (const ids of chunk(friendIds, 100)) {
+        const qs = ids.join(",");
+        const r = await fetch(`https://users.roblox.com/v1/users?userIds=${qs}`, {
+          cache: "no-store",
+        });
+        if (!r.ok) continue;
+
+        const j = await r.json();
+        for (const u of j?.data ?? []) {
+          const uid = Number(u.id);
+          idToUser.set(uid, {
+            username: String(u.name ?? ""),
+            displayName: String(u.displayName ?? u.name ?? ""),
+          });
+        }
+      }
+    } catch {
+      // if this fails, we still fall back to rawFriends names
+    }
+
+    const friends = rawFriends.map((f) => {
+      const mapped = idToUser.get(f.id);
+      const username = mapped?.username || f.name || String(f.id);
+      const displayName = mapped?.displayName || f.displayName || f.name || String(f.id);
+      return { id: f.id, username, displayName };
+    });
 
     //
     // 4) Followers / following counts (best effort)
     //
     let followersCount = 0;
     let followingCount = 0;
+
     try {
       const followersRes = await fetch(
         `https://friends.roblox.com/v1/users/${userId}/followers/count`,
@@ -151,7 +187,7 @@ export async function GET(req: Request) {
     while (true) {
       const baseUrl = `https://badges.roblox.com/v1/users/${userId}/badges?limit=100&sortOrder=Desc`;
       const badgesUrl = badgesCursor
-        ? `${baseUrl}&cursor=${badgesCursor}`
+        ? `${baseUrl}&cursor=${encodeURIComponent(badgesCursor)}`
         : baseUrl;
 
       const res = await fetch(badgesUrl, { cache: "no-store" });
@@ -167,28 +203,24 @@ export async function GET(req: Request) {
 
       badges.push(...pageBadges);
 
-      if (typeof json?.total === "number") {
-        totalBadges = Number(json.total);
-      }
+      if (typeof json?.total === "number") totalBadges = Number(json.total);
 
       badgesCursor = json?.nextPageCursor ?? null;
       if (!badgesCursor) break;
     }
 
-    if (!totalBadges) {
-      totalBadges = badges.length;
-    }
+    if (!totalBadges) totalBadges = badges.length;
 
     //
     // 7) Username history (best effort, paginated)
     //
-    const usernameHistory: { name: string; created: string | null }[] = [];
+    const usernameHistory: string[] = [];
     let namesCursor: string | null = null;
 
     while (true) {
       const baseUrl = `https://users.roblox.com/v1/users/${userId}/username-history?limit=50&sortOrder=Desc`;
       const namesUrl = namesCursor
-        ? `${baseUrl}&cursor=${namesCursor}`
+        ? `${baseUrl}&cursor=${encodeURIComponent(namesCursor)}`
         : baseUrl;
 
       const res = await fetch(namesUrl, { cache: "no-store" });
@@ -197,10 +229,7 @@ export async function GET(req: Request) {
       const json = await res.json();
 
       const pageNames =
-        json?.data?.map((n: any) => ({
-          name: String(n.name ?? ""),
-          created: n.created ? String(n.created) : null,
-        })) ?? [];
+        json?.data?.map((n: any) => String(n.name ?? "")).filter(Boolean) ?? [];
 
       usernameHistory.push(...pageNames);
 
@@ -209,7 +238,7 @@ export async function GET(req: Request) {
     }
 
     //
-    // Build the payload your frontend expects
+    // ✅ IMPORTANT: Put EVERYTHING inside profile (what your UI expects)
     //
     const profile = {
       userId: Number(user.id),
@@ -219,22 +248,20 @@ export async function GET(req: Request) {
       created: String(user.created ?? ""),
       isBanned: Boolean(user.isBanned),
       avatarUrl,
+
       friendsCount,
       followersCount,
       followingCount,
       groupsCount,
       totalBadges,
-    };
 
-    const payload = {
-      profile,
       friends,
       groups,
       badges,
       usernameHistory,
     };
 
-    return NextResponse.json(payload, { status: 200 });
+    return NextResponse.json({ profile }, { status: 200 });
   } catch (err) {
     console.error("Roblox user API error:", err);
     return NextResponse.json(
