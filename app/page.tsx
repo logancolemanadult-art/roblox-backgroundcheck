@@ -1,628 +1,524 @@
 "use client";
 
-import { useState } from "react";
+import React, { useState } from "react";
 
-type Division = {
-  id: string;
+type DivisionId = "default" | "navy" | "intel" | "spec";
+
+interface Division {
+  id: DivisionId;
   name: string;
   color: string;
-};
+}
 
-type RobloxProfile = {
+const DIVISIONS: Division[] = [
+  { id: "default", name: "Default", color: "text-blue-300" },
+  { id: "navy", name: "Navy / Fleet", color: "text-cyan-300" },
+  { id: "intel", name: "Intelligence", color: "text-indigo-300" },
+  { id: "spec", name: "Special Forces", color: "text-emerald-300" },
+];
+
+interface RobloxFriend {
+  id: number;
+  username: string;
+  displayName: string;
+}
+
+interface RobloxGroup {
+  id: number;
+  name: string;
+  role: string;
+}
+
+interface RobloxBadge {
+  id: number;
+  name: string;
+}
+
+interface RobloxProfile {
   userId: number;
   username: string;
   displayName: string;
   description: string;
   created: string;
   isBanned: boolean;
-  avatarUrl: string | null;
+  avatarUrl: string;
 
-  friendsCount: number;
-  followersCount: number;
-  followingCount: number;
+  friendsCount?: number;
+  followersCount?: number;
+  followingCount?: number;
+  groupCount?: number;
+  totalBadges?: number;
 
-  friends: { id: number; username: string }[];
+  friends?: RobloxFriend[];
+  groups?: RobloxGroup[];
+  badges?: RobloxBadge[];
+  usernameHistory?: string[];
+}
 
-  groups: { id: number; name: string; role: string }[];
+interface BlacklistEntry {
+  division: string;
+  divisionName: string;
+  reason: string;
+  type: "global" | "division";
+}
 
-  badges: { id: number; name: string }[];
-  totalBadges: number;
-
-  usernameHistory: string[];
-};
-
-type BlacklistResult = {
-  blacklistedGroups: { id: number; name: string; reason: string }[];
-  blacklistedFriends: { id: number; username: string; reason: string }[];
-  crossDivision: { divisionId: string; divisionName: string }[];
-};
-
-type RiskSummary = {
+interface RiskSummary {
   level: "Low" | "Medium" | "High";
   score: number;
   factors: string[];
   warnings: string[];
+}
+
+interface ApiResponse {
+  profile: RobloxProfile;
+  blacklist: {
+    global: BlacklistEntry[];
+    division: BlacklistEntry[];
+  };
+  risk: RiskSummary;
+}
+
+const EMPTY_RISK: RiskSummary = {
+  level: "Low",
+  score: 0,
+  factors: [],
+  warnings: [],
 };
 
-const DIVISIONS: Division[] = [
-  { id: "default", name: "Default", color: "text-blue-300" },
-  { id: "navy", name: "Navy / Fleet", color: "text-cyan-300" },
-  { id: "intel", name: "Intelligence", color: "text-indigo-300" },
-  { id: "sf", name: "Special Forces", color: "text-emerald-300" },
-];
+const EMPTY_BLACKLIST = {
+  global: [] as BlacklistEntry[],
+  division: [] as BlacklistEntry[],
+};
 
-const steps = [
-  { key: "division", label: "Select Division" },
-  { key: "userid", label: "Enter User ID" },
-  { key: "general", label: "General Info" },
-  { key: "eval", label: "Evaluation" },
-] as const;
-
-type StepKey = (typeof steps)[number]["key"];
+function Info({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="bg-zinc-950 border border-zinc-800 rounded-xl p-3">
+      <div className="text-xs text-zinc-400">{label}</div>
+      <div className="font-semibold">{value}</div>
+    </div>
+  );
+}
 
 export default function Page() {
-  const [step, setStep] = useState<StepKey>("division");
-  const [division, setDivision] = useState<Division>(DIVISIONS[0]);
+  const [divisionId, setDivisionId] = useState<DivisionId>("default");
   const [userIdInput, setUserIdInput] = useState("");
   const [loading, setLoading] = useState(false);
-
-  const [profile, setProfile] = useState<RobloxProfile | null>(null);
-  const [blacklist, setBlacklist] = useState<BlacklistResult | null>(null);
-  const [risk, setRisk] = useState<RiskSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [data, setData] = useState<ApiResponse | null>(null);
 
-  const stepIndex = steps.findIndex((s) => s.key === step);
+  const selectedDivision =
+    DIVISIONS.find((d) => d.id === divisionId) ?? DIVISIONS[0];
 
-  function goTo(i: number) {
-    const next = steps[i]?.key;
-    if (!next) return;
-    setStep(next);
-  }
+  async function handleAnalyze() {
+    const trimmed = userIdInput.trim();
+    if (!trimmed) return;
 
-  async function analyze() {
-    if (!userIdInput.trim()) return;
     setLoading(true);
     setError(null);
-    setProfile(null);
-    setBlacklist(null);
-    setRisk(null);
+    setData(null);
 
     try {
-      const r1 = await fetch(
-        `/api/roblox/user?id=${encodeURIComponent(userIdInput.trim())}`
+      const res = await fetch(
+        `/api/roblox/user?id=${encodeURIComponent(trimmed)}`,
+        { cache: "no-store" }
       );
-      const p = await r1.json();
-      if (!r1.ok) throw new Error(p?.error || "Roblox fetch failed");
 
-      const r2 = await fetch(
-        `/api/evaluate?division=${division.id}&id=${encodeURIComponent(
-          userIdInput.trim()
-        )}`
-      );
-      const e = await r2.json();
-      if (!r2.ok) throw new Error(e?.error || "Evaluation failed");
+      if (!res.ok) {
+        throw new Error(`API error ${res.status}`);
+      }
 
-      setProfile(p.profile);
-      setBlacklist(e.blacklist);
-      setRisk(e.risk);
+      const raw = await res.json();
 
-      setStep("general");
+      // --- SAFE normalisation so nothing is ever undefined ---
+      const profileRaw: RobloxProfile = raw.profile ?? raw;
+
+      const profile: RobloxProfile = {
+        ...profileRaw,
+        friends: (raw.friends ?? profileRaw.friends ?? []) as RobloxFriend[],
+        groups: (raw.groups ?? profileRaw.groups ?? []) as RobloxGroup[],
+        badges: (raw.badges ?? profileRaw.badges ?? []) as RobloxBadge[],
+        usernameHistory: (raw.usernameHistory ??
+          profileRaw.usernameHistory ??
+          []) as string[],
+      };
+
+      const blacklist = (raw.blacklist ?? EMPTY_BLACKLIST) as ApiResponse["blacklist"];
+
+      const risk = (raw.risk ?? EMPTY_RISK) as RiskSummary;
+
+      setData({ profile, blacklist, risk });
     } catch (err: any) {
-      setError(err.message || "Something went wrong");
+      console.error(err);
+      setError(err?.message ?? "Something went wrong");
     } finally {
       setLoading(false);
     }
   }
 
-  const createdDate = profile?.created
-    ? new Date(profile.created).toLocaleDateString()
-    : "?";
+  // --- pre-compute safe stuff for rendering ---
+  const profile = data?.profile;
+  const risk = data?.risk ?? EMPTY_RISK;
+  const blacklist = data?.blacklist ?? EMPTY_BLACKLIST;
+
+  const friendsArr = profile?.friends ?? [];
+  const groupsArr = profile?.groups ?? [];
+  const badgesArr = profile?.badges ?? [];
+  const usernameHistoryArr = profile?.usernameHistory ?? [];
+
+  const friendsCount =
+    profile?.friendsCount ?? friendsArr.length ?? 0;
+  const groupsCount = profile?.groupCount ?? groupsArr.length ?? 0;
+  const badgeCount =
+    profile?.totalBadges ?? badgesArr.length ?? 0;
 
   return (
     <main className="min-h-screen bg-zinc-950 text-zinc-50">
-      {/* Top Stepper */}
-      <div className="sticky top-0 z-30 bg-zinc-950/90 backdrop-blur border-b border-zinc-800">
-        <div className="max-w-6xl mx-auto px-4 py-4">
-          <Stepper currentIndex={stepIndex} onJump={goTo} />
-        </div>
-      </div>
+      <div className="max-w-5xl mx-auto px-4 py-8 space-y-6">
+        <header className="flex items-center justify-between gap-4">
+          <div>
+            <h1 className="text-2xl font-semibold tracking-tight">
+              Roblox Background Check
+            </h1>
+            <p className="text-sm text-zinc-400">
+              Internal tool for QUSN background checks. Uses public Roblox data
+              + manual blacklist info.
+            </p>
+          </div>
+          <div className="text-xs text-right text-zinc-500">
+            Division:
+            <span className={`ml-1 font-medium ${selectedDivision.color}`}>
+              {selectedDivision.name}
+            </span>
+          </div>
+        </header>
 
-      <div className="max-w-6xl mx-auto px-4 py-8 space-y-6">
-        {/* STEP 1: Select Division */}
-        {step === "division" && (
-          <SectionCard title="Select Division">
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-              {DIVISIONS.map((d) => {
-                const active = division.id === d.id;
-                return (
+        {/* Step 1 + 2: division + user id */}
+        <section className="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-4 sm:p-5 space-y-4">
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div>
+              <label className="text-xs font-medium text-zinc-400">
+                Select Division
+              </label>
+              <div className="mt-1 grid grid-cols-2 gap-2">
+                {DIVISIONS.map((div) => (
                   <button
-                    key={d.id}
-                    onClick={() => setDivision(d)}
-                    className={[
-                      "text-left rounded-xl border p-4 transition",
-                      active
-                        ? "border-blue-400 bg-blue-950/40"
-                        : "border-zinc-800 bg-zinc-900 hover:bg-zinc-800/70",
-                    ].join(" ")}
+                    key={div.id}
+                    type="button"
+                    onClick={() => setDivisionId(div.id)}
+                    className={`rounded-xl border px-3 py-2 text-left text-xs sm:text-sm transition ${
+                      divisionId === div.id
+                        ? "border-sky-400 bg-sky-500/10 text-sky-100"
+                        : "border-zinc-800 bg-zinc-900 hover:border-zinc-700"
+                    }`}
                   >
-                    <div className={`font-semibold ${d.color}`}>{d.name}</div>
-                    <div className="text-xs text-zinc-400 mt-1">
-                      BGC ruleset for this division
+                    <div className={div.color}>{div.name}</div>
+                    <div className="text-[10px] text-zinc-400">
+                      {div.id === "default"
+                        ? "Generic report"
+                        : "Applies division rules"}
                     </div>
                   </button>
-                );
-              })}
-            </div>
-
-            <div className="flex justify-end pt-4">
-              <PrimaryButton onClick={() => setStep("userid")}>
-                Continue
-              </PrimaryButton>
-            </div>
-          </SectionCard>
-        )}
-
-        {/* STEP 2: Enter User ID */}
-        {step === "userid" && (
-          <SectionCard title={`Verify User - ${division.name}`}>
-            <div className="space-y-3">
-              <label className="text-sm text-zinc-400">Roblox User ID</label>
-              <input
-                className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 outline-none"
-                placeholder="Enter Roblox User ID..."
-                value={userIdInput}
-                onChange={(e) => setUserIdInput(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && analyze()}
-              />
-            </div>
-
-            <div className="flex items-center justify-center pt-6">
-              <PrimaryButton onClick={analyze} disabled={loading}>
-                {loading ? "Analyzing..." : "Analyze Account"}
-              </PrimaryButton>
-            </div>
-
-            {error && (
-              <div className="mt-4 bg-red-950/40 border border-red-900 rounded-xl p-3 text-sm">
-                {error}
+                ))}
               </div>
-            )}
-
-            <div className="flex justify-between pt-4">
-              <GhostButton onClick={() => setStep("division")}>
-                Back
-              </GhostButton>
             </div>
-          </SectionCard>
-        )}
 
-        {/* STEP 3: General Info */}
-        {step === "general" && profile && (
-          <>
-            <h2 className="text-2xl font-bold tracking-tight">
-              General Information
-            </h2>
-
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-              {/* Basic Info */}
-              <InfoCard title="Basic Information">
-                <InfoRow label="User ID" value={String(profile.userId)} />
-                <InfoRow label="Name" value={profile.username} />
-                <InfoRow
-                  label="Description"
-                  value={profile.description || "No description."}
+            <div>
+              <label className="text-xs font-medium text-zinc-400">
+                Roblox User ID
+              </label>
+              <div className="mt-1 flex gap-2">
+                <input
+                  className="flex-1 rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm outline-none focus:border-sky-500"
+                  placeholder="e.g. 1457018669"
+                  value={userIdInput}
+                  onChange={(e) => setUserIdInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") handleAnalyze();
+                  }}
                 />
-                <InfoRow label="Created At" value={createdDate} />
-              </InfoCard>
+                <button
+                  type="button"
+                  onClick={handleAnalyze}
+                  disabled={loading || !userIdInput.trim()}
+                  className="rounded-xl bg-sky-500 px-4 py-2 text-sm font-semibold text-zinc-950 disabled:opacity-60"
+                >
+                  {loading ? "Checking..." : "Analyze"}
+                </button>
+              </div>
+              <p className="mt-1 text-[11px] text-zinc-500">
+                Use the numeric user ID, not the username.
+              </p>
+            </div>
+          </div>
 
-              {/* Avatar */}
-              <InfoCard title="Avatar">
-                <div className="flex justify-center py-8">
-                  {profile.avatarUrl ? (
-                    <img
-                      src={profile.avatarUrl}
-                      alt="avatar"
-                      className="w-40 h-40 rounded-2xl border border-zinc-700"
-                    />
-                  ) : (
-                    <div className="w-40 h-40 rounded-2xl bg-zinc-800 grid place-items-center text-zinc-500">
-                      no img
+          {error && (
+            <div className="rounded-xl border border-red-500/60 bg-red-500/10 px-3 py-2 text-xs text-red-100">
+              {error}
+            </div>
+          )}
+        </section>
+
+        {/* Step 3: results */}
+        {profile && (
+          <section className="space-y-4">
+            {/* General Info */}
+            <div className="grid gap-4 lg:grid-cols-3">
+              <div className="lg:col-span-2 bg-zinc-900/60 border border-zinc-800 rounded-2xl p-4 space-y-3">
+                <div className="flex items-center gap-3">
+                  <img
+                    src={profile.avatarUrl}
+                    alt={profile.username}
+                    className="h-16 w-16 rounded-xl bg-zinc-800"
+                  />
+                  <div>
+                    <div className="text-sm text-zinc-400">
+                      {profile.displayName}
                     </div>
-                  )}
+                    <div className="text-lg font-semibold">
+                      @{profile.username}
+                    </div>
+                    <div className="text-xs text-zinc-500">
+                      ID: {profile.userId}
+                    </div>
+                  </div>
                 </div>
-              </InfoCard>
 
-              {/* Social */}
-              <InfoCard title="Social Information">
-                <InfoRow
-                  label="Friends Count"
-                  value={String(profile.friendsCount)}
-                />
-                <InfoRow
-                  label="Followers"
-                  value={String(profile.followersCount)}
-                />
-                <InfoRow
-                  label="Following"
-                  value={String(profile.followingCount)}
-                />
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-1">
+                  <Info
+                    label="Account Created"
+                    value={profile.created ?? "Unknown"}
+                  />
+                  <Info
+                    label="Friends"
+                    value={friendsCount.toString()}
+                  />
+                  <Info
+                    label="Groups"
+                    value={groupsCount.toString()}
+                  />
+                  <Info
+                    label="Badges"
+                    value={badgeCount.toString()}
+                  />
+                </div>
 
-                <div className="mt-3 text-sm font-semibold">Friends List</div>
-                <div className="mt-2 max-h-56 overflow-auto space-y-1 text-sm text-zinc-200">
-                  {profile.friends.length ? (
-                    profile.friends.map((f) => (
-                      <div key={f.id} className="flex justify-between">
-                        <span>@{f.username}</span>
-                        <span className="text-zinc-500">{f.id}</span>
-                      </div>
-                    ))
-                  ) : (
+                <div className="pt-2">
+                  <div className="text-xs text-zinc-400 mb-1">Bio</div>
+                  <div className="text-xs sm:text-sm text-zinc-200 whitespace-pre-wrap bg-zinc-950 border border-zinc-800 rounded-xl p-3">
+                    {profile.description || "No description."}
+                  </div>
+                </div>
+              </div>
+
+              {/* Risk summary */}
+              <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-4 space-y-3">
+                <div className="text-sm font-semibold">Risk Evaluation</div>
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-zinc-400">Level:</span>
+                  <span
+                    className={
+                      risk.level === "High"
+                        ? "text-red-400 text-sm font-semibold"
+                        : risk.level === "Medium"
+                        ? "text-amber-300 text-sm font-semibold"
+                        : "text-emerald-300 text-sm font-semibold"
+                    }
+                  >
+                    {risk.level}
+                  </span>
+                </div>
+                <Info
+                  label="Risk Score"
+                  value={risk.score.toString()}
+                />
+                <div className="text-xs text-zinc-400">Risk Factors:</div>
+                <ul className="text-xs text-zinc-200 list-disc list-inside space-y-1 max-h-32 overflow-auto">
+                  {risk.factors.length === 0 && (
+                    <li>No specific risk factors detected.</li>
+                  )}
+                  {risk.factors.map((f, i) => (
+                    <li key={i}>{f}</li>
+                  ))}
+                </ul>
+              </div>
+            </div>
+
+            {/* Friends / Groups / Badges */}
+            <div className="grid gap-4 lg:grid-cols-3">
+              {/* Friends */}
+              <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-4 space-y-2">
+                <div className="flex items-center justify-between">
+                  <div className="text-sm font-semibold">
+                    Friends ({friendsCount})
+                  </div>
+                </div>
+                <div className="text-[11px] text-zinc-400">
+                  Showing up to {friendsArr.length} entries from API.
+                </div>
+                <div className="max-h-60 overflow-auto space-y-1 text-xs">
+                  {friendsArr.length === 0 && (
                     <div className="text-zinc-500">
-                      No friends found / private.
+                      No friends returned by API.
                     </div>
                   )}
+                  {friendsArr.map((f) => (
+                    <div
+                      key={f.id}
+                      className="flex justify-between gap-2 rounded-lg bg-zinc-950 border border-zinc-800 px-2 py-1"
+                    >
+                      <span className="truncate">{f.displayName}</span>
+                      <span className="text-zinc-400 truncate text-right">
+                        @{f.username} ({f.id})
+                      </span>
+                    </div>
+                  ))}
                 </div>
-              </InfoCard>
-            </div>
-
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-              {/* Username History */}
-              <InfoCard title="Username History">
-                <ScrollableList
-                  items={profile.usernameHistory}
-                  emptyText="No history found."
-                />
-              </InfoCard>
-
-              {/* Badges */}
-              <InfoCard title="Badges">
-                <InfoRow
-                  label="Badge Count"
-                  value={String(profile.totalBadges)}
-                />
-                <ScrollableList
-                  items={profile.badges.map((b) => b.name)}
-                  emptyText="No badges loaded."
-                />
-              </InfoCard>
+              </div>
 
               {/* Groups */}
-              <InfoCard title="Groups">
-                <InfoRow
-                  label="Group Count"
-                  value={String(profile.groups.length)}
-                />
-                <ScrollableList
-                  items={profile.groups.map(
-                    (g) => `${g.name} (Role: ${g.role})`
-                  )}
-                  emptyText="No groups loaded."
-                />
-              </InfoCard>
-            </div>
-
-            <div className="flex justify-end pt-2">
-              <PrimaryButton onClick={() => setStep("eval")}>
-                Continue to Evaluation →
-              </PrimaryButton>
-            </div>
-          </>
-        )}
-
-        {/* STEP 4: Evaluation */}
-        {step === "eval" && profile && risk && blacklist && (
-          <>
-            <h2 className="text-3xl font-bold tracking-tight">
-              Evaluation Report
-            </h2>
-
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-              <InfoCard title="Risk Evaluation">
-                <InfoRow label="Risk Level" value={risk.level} pill />
-                <InfoRow label="Risk Score" value={String(risk.score)} />
-                <div className="mt-3">
-                  <div className="text-sm font-semibold mb-1">Risk Factors:</div>
-                  <ul className="list-disc list-inside text-sm text-zinc-200 space-y-1">
-                    {risk.factors.length ? (
-                      risk.factors.map((f, i) => <li key={i}>{f}</li>)
-                    ) : (
-                      <li className="text-zinc-500">None found.</li>
-                    )}
-                  </ul>
+              <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-4 space-y-2">
+                <div className="flex items-center justify-between">
+                  <div className="text-sm font-semibold">
+                    Groups ({groupsCount})
+                  </div>
                 </div>
-              </InfoCard>
-
-              <InfoCard title="Blacklisted Groups">
-                <InfoRow
-                  label="Count"
-                  value={String(blacklist.blacklistedGroups.length)}
-                />
-                <ScrollableList
-                  items={blacklist.blacklistedGroups.map(
-                    (g) => `${g.name} — ${g.reason}`
+                <div className="max-h-60 overflow-auto space-y-1 text-xs">
+                  {groupsArr.length === 0 && (
+                    <div className="text-zinc-500">
+                      No groups returned by API.
+                    </div>
                   )}
-                  emptyText="None."
-                />
-              </InfoCard>
+                  {groupsArr.map((g) => (
+                    <div
+                      key={g.id}
+                      className="rounded-lg bg-zinc-950 border border-zinc-800 px-2 py-1"
+                    >
+                      <div className="flex justify-between gap-2">
+                        <span className="truncate">{g.name}</span>
+                        <span className="text-zinc-400 truncate text-right">
+                          {g.role}
+                        </span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
 
-              <InfoCard title="Blacklisted Friends">
-                <InfoRow
-                  label="Count"
-                  value={String(blacklist.blacklistedFriends.length)}
-                />
-                <ScrollableList
-                  items={blacklist.blacklistedFriends.map(
-                    (f) => `${f.username} — ${f.reason}`
+              {/* Badges */}
+              <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-4 space-y-2">
+                <div className="flex items-center justify-between">
+                  <div className="text-sm font-semibold">
+                    Badges ({badgeCount})
+                  </div>
+                </div>
+                <div className="max-h-60 overflow-auto space-y-1 text-xs">
+                  {badgesArr.length === 0 && (
+                    <div className="text-zinc-500">
+                      No badges returned by API.
+                    </div>
                   )}
-                  emptyText="None."
-                />
-              </InfoCard>
+                  {badgesArr.map((b) => (
+                    <div
+                      key={b.id}
+                      className="rounded-lg bg-zinc-950 border border-zinc-800 px-2 py-1"
+                    >
+                      {b.name}
+                    </div>
+                  ))}
+                </div>
+              </div>
             </div>
 
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-              <InfoCard title="Warnings">
-                <ScrollableList
-                  items={risk.warnings}
-                  emptyText="No warnings found."
-                />
-              </InfoCard>
+            {/* Username History + Blacklists */}
+            <div className="grid gap-4 lg:grid-cols-2">
+              {/* Username history */}
+              <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-4 space-y-2">
+                <div className="text-sm font-semibold">
+                  Username History ({usernameHistoryArr.length})
+                </div>
+                <ul className="max-h-60 overflow-auto text-xs space-y-1">
+                  {usernameHistoryArr.length === 0 && (
+                    <li className="text-zinc-500">
+                      No username history provided.
+                    </li>
+                  )}
+                  {usernameHistoryArr.map((name, i) => (
+                    <li
+                      key={i}
+                      className="rounded-lg bg-zinc-950 border border-zinc-800 px-2 py-1"
+                    >
+                      {name}
+                    </li>
+                  ))}
+                </ul>
+              </div>
 
-              <InfoCard title="Cross-Division Blacklist Status">
-                <ScrollableList
-                  items={
-                    blacklist.crossDivision.length
-                      ? blacklist.crossDivision.map(
-                          (d) => `Blacklisted in ${d.divisionName}`
-                        )
-                      : ["Not blacklisted in other divisions ✅"]
-                  }
-                  emptyText="Not blacklisted."
-                />
-              </InfoCard>
-            </div>
+              {/* Blacklists */}
+              <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-4 space-y-3">
+                <div className="text-sm font-semibold">Blacklist Status</div>
 
-            <div className="flex items-center justify-center gap-3 pt-6">
-              <GhostButton
-                onClick={() => {
-                  navigator.clipboard.writeText(
-                    makeClipboardReport(division, profile, risk, blacklist)
-                  );
-                  alert("Copied report to clipboard.");
-                }}
-              >
-                Export to Clipboard
-              </GhostButton>
-              <DangerButton
-                onClick={() => {
-                  setStep("division");
-                  setUserIdInput("");
-                  setProfile(null);
-                  setBlacklist(null);
-                  setRisk(null);
-                  setError(null);
-                }}
-              >
-                Start Over
-              </DangerButton>
+                <div className="space-y-2 text-xs">
+                  <div className="font-medium text-zinc-300">
+                    Division Blacklists
+                  </div>
+                  {blacklist.division.length === 0 && (
+                    <div className="text-zinc-500">
+                      No division blacklist entries known.
+                    </div>
+                  )}
+                  {blacklist.division.map((entry, i) => (
+                    <div
+                      key={`div-${i}`}
+                      className="rounded-lg bg-zinc-950 border border-zinc-800 px-2 py-1"
+                    >
+                      <div className="font-semibold">
+                        {entry.divisionName} ({entry.division})
+                      </div>
+                      <div className="text-zinc-400">
+                        Type: {entry.type.toUpperCase()}
+                      </div>
+                      <div className="text-zinc-300">
+                        Reason: {entry.reason}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="space-y-2 text-xs">
+                  <div className="font-medium text-zinc-300">
+                    Global / QUSN Blacklists
+                  </div>
+                  {blacklist.global.length === 0 && (
+                    <div className="text-zinc-500">
+                      Not blacklisted at global level (as far as this tool
+                      knows).
+                    </div>
+                  )}
+                  {blacklist.global.map((entry, i) => (
+                    <div
+                      key={`global-${i}`}
+                      className="rounded-lg bg-zinc-950 border border-zinc-800 px-2 py-1"
+                    >
+                      <div className="font-semibold">
+                        {entry.divisionName || "Global"}
+                      </div>
+                      <div className="text-zinc-300">
+                        Reason: {entry.reason}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
             </div>
-          </>
+          </section>
         )}
+
+        {/* tiny footer */}
+        <footer className="pt-4 pb-6 text-[10px] text-zinc-600 text-center">
+          This tool only uses public Roblox data + manually curated blacklist
+          info. Always confirm results with human judgement.
+        </footer>
       </div>
     </main>
   );
-}
-
-/* ---------- UI bits ---------- */
-
-function Stepper({
-  currentIndex,
-  onJump,
-}: {
-  currentIndex: number;
-  onJump: (i: number) => void;
-}) {
-  return (
-    <div className="flex items-center gap-3 select-none">
-      {steps.map((s, i) => (
-        <div key={s.key} className="flex items-center gap-3 flex-1">
-          <button
-            onClick={() => onJump(i)}
-            className="flex items-center gap-2 text-xs sm:text-sm text-zinc-300 hover:text-white"
-          >
-            <div
-              className={[
-                "h-3 w-3 rounded-full border",
-                i <= currentIndex
-                  ? "bg-blue-400 border-blue-300"
-                  : "bg-zinc-900 border-zinc-600",
-              ].join(" ")}
-            />
-            <span className={i === currentIndex ? "text-blue-300" : ""}>
-              {s.label}
-            </span>
-          </button>
-          {i < steps.length - 1 && (
-            <div className="h-[2px] flex-1 bg-zinc-800">
-              <div
-                className="h-[2px] bg-blue-400 transition-all"
-                style={{ width: i < currentIndex ? "100%" : "0%" }}
-              />
-            </div>
-          )}
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function SectionCard({
-  title,
-  children,
-}: {
-  title: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className="bg-[#1c2a52] border border-[#2f3e6a] rounded-2xl p-6">
-      <div className="text-xl font-bold mb-4 text-blue-100">{title}</div>
-      {children}
-    </div>
-  );
-}
-
-function InfoCard({
-  title,
-  children,
-}: {
-  title: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className="bg-[#1c2a52] border border-[#2f3e6a] rounded-2xl p-5">
-      <div className="text-lg font-semibold text-blue-200 mb-3 border-b border-[#2f3e6a] pb-2">
-        {title}
-      </div>
-      {children}
-    </div>
-  );
-}
-
-function InfoRow({
-  label,
-  value,
-  pill,
-}: {
-  label: string;
-  value: string;
-  pill?: boolean;
-}) {
-  return (
-    <div className="flex justify-between gap-3 py-1 text-sm">
-      <div className="text-blue-200/80">{label}:</div>
-      {pill ? (
-        <span
-          className={[
-            "px-2 py-[2px] rounded-full text-xs font-semibold",
-            value === "Low"
-              ? "bg-emerald-200 text-emerald-900"
-              : value === "Medium"
-              ? "bg-yellow-200 text-yellow-900"
-              : "bg-red-200 text-red-900",
-          ].join(" ")}
-        >
-          {value}
-        </span>
-      ) : (
-        <div className="text-white font-semibold text-right">{value}</div>
-      )}
-    </div>
-  );
-}
-
-function ScrollableList({
-  items,
-  emptyText,
-}: {
-  items: string[];
-  emptyText: string;
-}) {
-  return (
-    <div className="max-h-64 overflow-auto text-sm space-y-1">
-      {items.length ? (
-        items.map((it, i) => (
-          <div key={i} className="text-zinc-100">
-            • {it}
-          </div>
-        ))
-      ) : (
-        <div className="text-zinc-400">{emptyText}</div>
-      )}
-    </div>
-  );
-}
-
-function PrimaryButton({
-  children,
-  onClick,
-  disabled,
-}: {
-  children: React.ReactNode;
-  onClick?: () => void;
-  disabled?: boolean;
-}) {
-  return (
-    <button
-      onClick={onClick}
-      disabled={disabled}
-      className="px-5 py-2 rounded-xl bg-blue-500 text-black font-semibold hover:bg-blue-400 disabled:opacity-60"
-    >
-      {children}
-    </button>
-  );
-}
-
-function GhostButton({
-  children,
-  onClick,
-}: {
-  children: React.ReactNode;
-  onClick?: () => void;
-}) {
-  return (
-    <button
-      onClick={onClick}
-      className="px-5 py-2 rounded-xl bg-zinc-900 border border-zinc-700 hover:bg-zinc-800 font-semibold"
-    >
-      {children}
-    </button>
-  );
-}
-
-function DangerButton({
-  children,
-  onClick,
-}: {
-  children: React.ReactNode;
-  onClick?: () => void;
-}) {
-  return (
-    <button
-      onClick={onClick}
-      className="px-5 py-2 rounded-xl bg-red-500 text-white font-semibold hover:bg-red-400"
-    >
-      {children}
-    </button>
-  );
-}
-
-function makeClipboardReport(
-  division: Division,
-  profile: RobloxProfile,
-  risk: RiskSummary,
-  blacklist: BlacklistResult
-) {
-  return `
-BGC Report — ${division.name}
-
-User: ${profile.displayName} (@${profile.username})
-ID: ${profile.userId}
-Created: ${profile.created}
-Banned: ${profile.isBanned ? "Yes" : "No"}
-
-Risk Level: ${risk.level}
-Risk Score: ${risk.score}
-Factors: ${risk.factors.join(", ") || "None"}
-
-Blacklisted Groups (${blacklist.blacklistedGroups.length}):
-${blacklist.blacklistedGroups.map((g) => `- ${g.name}: ${g.reason}`).join("\n") || "None"}
-
-Blacklisted Friends (${blacklist.blacklistedFriends.length}):
-${blacklist.blacklistedFriends.map((f) => `- ${f.username}: ${f.reason}`).join("\n") || "None"}
-
-Warnings:
-${risk.warnings.join("\n") || "None"}
-
-Cross-Division:
-${blacklist.crossDivision.map((d) => `- ${d.divisionName}`).join("\n") || "None"}
-`.trim();
 }
