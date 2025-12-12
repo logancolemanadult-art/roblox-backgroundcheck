@@ -1,6 +1,9 @@
 // @ts-nocheck
 import { NextResponse } from "next/server";
 
+/**
+ * Helpers
+ */
 function daysSince(isoDate: string): number {
   const created = new Date(isoDate).getTime();
   const now = Date.now();
@@ -18,7 +21,7 @@ function computeRisk(params: {
 }) {
   const ageDays = daysSince(params.createdISO);
 
-  // Your thresholds
+  // Your BGC thresholds
   const REQ = {
     ageDays: 60,
     badges: 300,
@@ -29,86 +32,89 @@ function computeRisk(params: {
   const factors: string[] = [];
   const warnings: string[] = [];
 
-  // “Gap points” system:
-  // 0 = meets requirement
-  // 1 = slightly under
-  // 2 = clearly under
-  // 3 = very under
+  /**
+   * Gap score system:
+   * 0 = meets requirement
+   * 1 = slightly under
+   * 2 = clearly under
+   * 3 = very under
+   *
+   * Total score -> Level:
+   * 0-2 = Low
+   * 3-7 = Medium
+   * 8+  = High
+   */
   let score = 0;
 
-  // Account age scoring
+  // Account age
   if (ageDays >= REQ.ageDays) {
     // ok
   } else if (ageDays >= 50) {
     score += 1;
-    factors.push(`Account age is under ${REQ.ageDays} days (${ageDays}d).`);
+    factors.push(`Account age slightly under ${REQ.ageDays} days (${ageDays}d).`);
   } else if (ageDays >= 30) {
     score += 2;
-    factors.push(`Account age is low (${ageDays}d).`);
+    factors.push(`Account age under requirement (${ageDays}d).`);
   } else {
     score += 3;
-    factors.push(`Account age is very low (${ageDays}d).`);
+    factors.push(`Account age very low (${ageDays}d).`);
   }
 
-  // Badges scoring
+  // Badges
   if (params.badgesCount >= REQ.badges) {
     // ok
   } else if (params.badgesCount >= 250) {
     score += 1;
-    factors.push(`Badges are slightly under ${REQ.badges} (${params.badgesCount}).`);
+    factors.push(`Badges slightly under ${REQ.badges} (${params.badgesCount}).`);
   } else if (params.badgesCount >= 150) {
     score += 2;
-    factors.push(`Badges are low (${params.badgesCount}).`);
+    factors.push(`Badges under requirement (${params.badgesCount}).`);
   } else {
     score += 3;
-    factors.push(`Badges are very low (${params.badgesCount}).`);
+    factors.push(`Badges very low (${params.badgesCount}).`);
   }
 
-  // Friends scoring
+  // Friends
   if (params.friendsCount >= REQ.friends) {
     // ok
   } else if (params.friendsCount >= 15) {
     score += 1;
-    factors.push(`Friends are slightly under ${REQ.friends} (${params.friendsCount}).`);
+    factors.push(`Friends slightly under ${REQ.friends} (${params.friendsCount}).`);
   } else if (params.friendsCount >= 8) {
     score += 2;
-    factors.push(`Friends are low (${params.friendsCount}).`);
+    factors.push(`Friends under requirement (${params.friendsCount}).`);
   } else {
     score += 3;
-    factors.push(`Friends are very low (${params.friendsCount}).`);
+    factors.push(`Friends very low (${params.friendsCount}).`);
   }
 
-  // Groups scoring
+  // Groups
   if (params.groupsCount >= REQ.groups) {
     // ok
   } else if (params.groupsCount >= 8) {
     score += 1;
-    factors.push(`Groups are slightly under ${REQ.groups} (${params.groupsCount}).`);
+    factors.push(`Groups slightly under ${REQ.groups} (${params.groupsCount}).`);
   } else if (params.groupsCount >= 4) {
     score += 2;
-    factors.push(`Groups are low (${params.groupsCount}).`);
+    factors.push(`Groups under requirement (${params.groupsCount}).`);
   } else {
     score += 3;
-    factors.push(`Groups are very low (${params.groupsCount}).`);
+    factors.push(`Groups very low (${params.groupsCount}).`);
   }
 
-  // Convert score -> level (simple + consistent)
   let level: RiskLevel = "Low";
   if (score >= 8) level = "High";
   else if (score >= 3) level = "Medium";
 
-  // Extra warnings (optional)
-  if (ageDays === 0) warnings.push("Could not determine account age (missing/invalid created date).");
+  if (!params.createdISO) warnings.push("Missing created date from Roblox API.");
+  if (ageDays === 0 && params.createdISO) warnings.push("Could not compute account age.");
 
-  return {
-    level,
-    score,
-    factors,
-    warnings,
-    ageDays,
-  };
+  return { level, score, factors, warnings, ageDays };
 }
 
+/**
+ * Route
+ */
 export async function GET(req: Request) {
   try {
     const { searchParams } = new URL(req.url);
@@ -165,16 +171,14 @@ export async function GET(req: Request) {
     }
 
     //
-    // 3) Friends (full list, paginated)
+    // 3) Friends (paginated)
     //
     const friends: { id: number; username: string; displayName: string }[] = [];
     let friendsCursor: string | null = null;
 
     while (true) {
       const baseUrl = `https://friends.roblox.com/v1/users/${userId}/friends?limit=200&sortOrder=Asc`;
-      const friendsUrl = friendsCursor
-        ? `${baseUrl}&cursor=${encodeURIComponent(friendsCursor)}`
-        : baseUrl;
+      const friendsUrl = friendsCursor ? `${baseUrl}&cursor=${friendsCursor}` : baseUrl;
 
       const res = await fetch(friendsUrl, { cache: "no-store" });
       if (!res.ok) break;
@@ -183,10 +187,10 @@ export async function GET(req: Request) {
 
       const pageFriends =
         json?.data?.map((f: any) => ({
-          id: Number(f?.id),
-          // ✅ FIX: some responses use `name`, others may use `username`
-          username: String(f?.name ?? f?.username ?? ""),
-          displayName: String(f?.displayName ?? f?.name ?? f?.username ?? ""),
+          id: Number(f.id),
+          // Roblox friends API typically uses "name" as username
+          username: String(f.name ?? f.username ?? ""),
+          displayName: String(f.displayName ?? f.name ?? f.username ?? ""),
         })) ?? [];
 
       friends.push(...pageFriends);
@@ -238,9 +242,9 @@ export async function GET(req: Request) {
         const groupsJson = await groupsRes.json();
         const pageGroups =
           groupsJson?.data?.map((g: any) => ({
-            id: Number(g?.group?.id),
-            name: String(g?.group?.name ?? ""),
-            role: String(g?.role?.name ?? ""),
+            id: Number(g.group?.id),
+            name: String(g.group?.name ?? ""),
+            role: String(g.role?.name ?? ""),
           })) ?? [];
         groups.push(...pageGroups);
       }
@@ -257,9 +261,7 @@ export async function GET(req: Request) {
 
     while (true) {
       const baseUrl = `https://badges.roblox.com/v1/users/${userId}/badges?limit=100&sortOrder=Desc`;
-      const badgesUrl = badgesCursor
-        ? `${baseUrl}&cursor=${encodeURIComponent(badgesCursor)}`
-        : baseUrl;
+      const badgesUrl = badgesCursor ? `${baseUrl}&cursor=${badgesCursor}` : baseUrl;
 
       const res = await fetch(badgesUrl, { cache: "no-store" });
       if (!res.ok) break;
@@ -268,15 +270,13 @@ export async function GET(req: Request) {
 
       const pageBadges =
         json?.data?.map((b: any) => ({
-          id: Number(b?.id),
-          name: String(b?.name ?? ""),
+          id: Number(b.id),
+          name: String(b.name ?? ""),
         })) ?? [];
 
       badges.push(...pageBadges);
 
-      if (typeof json?.total === "number") {
-        totalBadges = Number(json.total);
-      }
+      if (typeof json?.total === "number") totalBadges = Number(json.total);
 
       badgesCursor = json?.nextPageCursor ?? null;
       if (!badgesCursor) break;
@@ -285,16 +285,14 @@ export async function GET(req: Request) {
     if (!totalBadges) totalBadges = badges.length;
 
     //
-    // 7) Username history (best effort, paginated)
+    // 7) Username history (best effort)
     //
     const usernameHistory: { name: string; created: string | null }[] = [];
     let namesCursor: string | null = null;
 
     while (true) {
       const baseUrl = `https://users.roblox.com/v1/users/${userId}/username-history?limit=50&sortOrder=Desc`;
-      const namesUrl = namesCursor
-        ? `${baseUrl}&cursor=${encodeURIComponent(namesCursor)}`
-        : baseUrl;
+      const namesUrl = namesCursor ? `${baseUrl}&cursor=${namesCursor}` : baseUrl;
 
       const res = await fetch(namesUrl, { cache: "no-store" });
       if (!res.ok) break;
@@ -303,8 +301,8 @@ export async function GET(req: Request) {
 
       const pageNames =
         json?.data?.map((n: any) => ({
-          name: String(n?.name ?? ""),
-          created: n?.created ? String(n.created) : null,
+          name: String(n.name ?? ""),
+          created: n.created ? String(n.created) : null,
         })) ?? [];
 
       usernameHistory.push(...pageNames);
@@ -314,15 +312,15 @@ export async function GET(req: Request) {
     }
 
     //
-    // Build payload
+    // Build profile (what your frontend expects)
     //
     const profile = {
-      userId: Number(user?.id),
-      username: String(user?.name ?? ""),
-      displayName: String(user?.displayName ?? user?.name ?? ""),
-      description: String(user?.description ?? ""),
-      created: String(user?.created ?? ""),
-      isBanned: Boolean(user?.isBanned),
+      userId: Number(user.id),
+      username: String(user.name ?? ""),
+      displayName: String(user.displayName ?? user.name ?? ""),
+      description: String(user.description ?? ""),
+      created: String(user.created ?? ""),
+      isBanned: Boolean(user.isBanned),
       avatarUrl,
       friendsCount,
       followersCount,
@@ -331,10 +329,37 @@ export async function GET(req: Request) {
       totalBadges,
     };
 
-    return NextResponse.json(
-      { profile, friends, groups, badges, usernameHistory },
-      { status: 200 }
-    );
+    //
+    // ✅ Risk rules based on YOUR BGC thresholds
+    //
+    const risk = computeRisk({
+      createdISO: profile.created,
+      friendsCount: profile.friendsCount,
+      groupsCount: profile.groupsCount,
+      badgesCount: profile.totalBadges,
+    });
+
+    //
+    // Final payload
+    //
+    const payload = {
+      profile,
+      friends,
+      groups,
+      badges,
+      usernameHistory,
+
+      // ✅ add this so UI can show LOW / MEDIUM / HIGH + reasons
+      riskSummary: {
+        level: risk.level,
+        score: risk.score,
+        ageDays: risk.ageDays,
+        factors: risk.factors,
+        warnings: risk.warnings,
+      },
+    };
+
+    return NextResponse.json(payload, { status: 200 });
   } catch (err) {
     console.error("Roblox user API error:", err);
     return NextResponse.json(
