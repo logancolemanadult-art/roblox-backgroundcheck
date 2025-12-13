@@ -399,7 +399,7 @@ export default function Page() {
                     <div className="text-white/70">Risk Level:</div>
 
                     <span className="rounded-full bg-white/10 px-4 py-2 font-semibold">
-                      {evaluation?.level ?? "—"}
+                      {evaluation ? evaluation.level : "—"}
                     </span>
                   </div>
 
