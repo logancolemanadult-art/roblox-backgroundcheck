@@ -2,6 +2,8 @@
 
 import React, { useMemo, useState } from "react";
 
+/** ---------------- Types ---------------- */
+
 type DivisionId = "default" | "navy" | "intel" | "sf";
 
 type Division = {
@@ -9,7 +11,7 @@ type Division = {
   name: string;
   subtitle: string;
   badgeLetter: string;
-  groupsCountLabel?: string; // optional
+  groupsCountLabel?: string;
 };
 
 type RobloxProfile = {
@@ -35,6 +37,32 @@ type RobloxProfile = {
 
 type RiskLevel = "Low" | "Medium" | "High";
 
+type ApiEvaluateResponse = {
+  blacklist?: {
+    blacklistedGroups?: { id: number; name: string; reason: string }[];
+    blacklistedFriends?: { id: number; username: string; reason: string }[];
+    crossDivision?: { divisionId: string; divisionName: string }[];
+  };
+  risk?: {
+    level?: RiskLevel;
+    score?: number;
+    factors?: string[];
+    warnings?: string[];
+  };
+
+  // tolerate older shapes just in case
+  level?: RiskLevel;
+  score?: number;
+  factors?: string[];
+  warnings?: string[];
+  blacklistedGroups?: { id: number; name: string; reason: string }[];
+  blacklistedFriends?: { id: number; username: string; reason: string }[];
+  crossDivision?: { divisionId: string; divisionName: string }[];
+
+  requirements?: any;
+  counts?: any;
+};
+
 type Evaluation = {
   level: RiskLevel;
   score: number;
@@ -43,23 +71,90 @@ type Evaluation = {
   blacklistedGroups: { id: number; name: string; reason: string }[];
   blacklistedFriends: { id: number; username: string; reason: string }[];
   crossDivision: { divisionId: string; divisionName: string }[];
+  requirements?: any;
+  counts?: any;
 };
 
+type StepKey = "division" | "userid" | "general" | "eval";
+
+/** ---------------- Consts ---------------- */
+
 const DIVISIONS: Division[] = [
-  { id: "default", name: "Default", subtitle: "Default list (only contains BL groups)", badgeLetter: "A", groupsCountLabel: "76 Groups" },
+  {
+    id: "default",
+    name: "Default",
+    subtitle: "Default list (only contains BL groups)",
+    badgeLetter: "A",
+    groupsCountLabel: "76 Groups",
+  },
   { id: "navy", name: "Navy / Fleet", subtitle: "Applies division rules", badgeLetter: "N" },
   { id: "intel", name: "Intelligence", subtitle: "Applies division rules", badgeLetter: "I" },
   { id: "sf", name: "Special Forces", subtitle: "Applies division rules", badgeLetter: "S" },
 ];
 
 const STEPS = [
-  { key: "division", label: "Select Division" },
-  { key: "userid", label: "Enter User ID" },
-  { key: "general", label: "General Info" },
-  { key: "eval", label: "Evaluation" },
-] as const;
+  { key: "division" as const, label: "Select Division" },
+  { key: "userid" as const, label: "Enter User ID" },
+  { key: "general" as const, label: "General Info" },
+  { key: "eval" as const, label: "Evaluation" },
+];
 
-type StepKey = (typeof STEPS)[number]["key"];
+/** ---------------- Helpers ---------------- */
+
+function normalizeEvaluation(api: ApiEvaluateResponse): Evaluation {
+  const level: RiskLevel =
+    (api?.risk?.level as RiskLevel) ??
+    (api?.level as RiskLevel) ??
+    "Low";
+
+  const score = Number(api?.risk?.score ?? api?.score ?? 0) || 0;
+
+  const factors = (api?.risk?.factors ?? api?.factors ?? []) as string[];
+  const warnings = (api?.risk?.warnings ?? api?.warnings ?? []) as string[];
+
+  const blacklistedGroups =
+    (api?.blacklist?.blacklistedGroups ?? api?.blacklistedGroups ?? []) as {
+      id: number;
+      name: string;
+      reason: string;
+    }[];
+
+  const blacklistedFriends =
+    (api?.blacklist?.blacklistedFriends ?? api?.blacklistedFriends ?? []) as {
+      id: number;
+      username: string;
+      reason: string;
+    }[];
+
+  const crossDivision =
+    (api?.blacklist?.crossDivision ?? api?.crossDivision ?? []) as {
+      divisionId: string;
+      divisionName: string;
+    }[];
+
+  return {
+    level,
+    score,
+    factors,
+    warnings,
+    blacklistedGroups,
+    blacklistedFriends,
+    crossDivision,
+    requirements: api?.requirements,
+    counts: api?.counts,
+  };
+}
+
+function formatCreated(created?: string) {
+  if (!created) return "-";
+  const d = new Date(created);
+  if (!isNaN(d.getTime())) {
+    return d.toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" });
+  }
+  return created;
+}
+
+/** ---------------- Page ---------------- */
 
 export default function Page() {
   const [step, setStep] = useState<StepKey>("division");
@@ -71,6 +166,9 @@ export default function Page() {
 
   const [profile, setProfile] = useState<RobloxProfile | null>(null);
   const [evaluation, setEvaluation] = useState<Evaluation | null>(null);
+
+  // turn off later
+  const DEBUG = true;
 
   const division = useMemo(
     () => DIVISIONS.find((d) => d.id === divisionId) ?? DIVISIONS[0],
@@ -103,22 +201,43 @@ export default function Page() {
     setErr(null);
 
     try {
-      const res = await fetch(`/api/roblox/user?id=${encodeURIComponent(String(userId))}`, {
-        method: "GET",
-      });
+      // 1) Roblox profile
+      const profileRes = await fetch(
+        `/api/roblox/user?id=${encodeURIComponent(String(userId))}&ts=${Date.now()}`,
+        { method: "GET", cache: "no-store" }
+      );
 
-      if (!res.ok) {
-        const text = await res.text().catch(() => "");
-        throw new Error(text || `Roblox API failed (${res.status})`);
+      if (!profileRes.ok) {
+        const text = await profileRes.text().catch(() => "");
+        throw new Error(text || `Roblox API failed (${profileRes.status})`);
       }
 
-      const data = (await res.json()) as { profile: RobloxProfile };
+      const profileJson = (await profileRes.json()) as { profile: RobloxProfile };
+      setProfile(profileJson.profile);
 
-      setProfile(data.profile);
+      // 2) Evaluation (LOW/MEDIUM/HIGH from backend)
+      const evalRes = await fetch(
+        `/api/evaluate?id=${encodeURIComponent(String(userId))}&division=${encodeURIComponent(
+          divisionId
+        )}&ts=${Date.now()}`,
+        { method: "GET", cache: "no-store" }
+      );
 
-      // Basic scoring (you can replace with your real rules)
-      const computed = computeEvaluation(data.profile, divisionId);
-      setEvaluation(computed);
+      if (!evalRes.ok) {
+        const text = await evalRes.text().catch(() => "");
+        throw new Error(text || `Evaluate API failed (${evalRes.status})`);
+      }
+
+      const evalJson = (await evalRes.json()) as ApiEvaluateResponse;
+
+      // Normalize into the exact UI shape
+      const normalized = normalizeEvaluation(evalJson);
+
+      // HARD debug proof
+      console.log("EVALUATE RAW:", evalJson);
+      console.log("EVALUATE NORMALIZED:", normalized);
+
+      setEvaluation(normalized);
 
       goTo("general");
     } catch (e: any) {
@@ -155,11 +274,7 @@ export default function Page() {
               <p className="text-white/60 mt-1">Available divisions based on your clearance level:</p>
 
               <div className="mt-6 flex items-center gap-8">
-                <DivisionCard
-                  division={division}
-                  selected
-                  onClick={() => setDivisionId(division.id)}
-                />
+                <DivisionCard division={division} selected onClick={() => setDivisionId(division.id)} />
               </div>
 
               <button
@@ -200,6 +315,7 @@ export default function Page() {
           {step === "general" && (
             <div className="space-y-6">
               <SectionTitle title="General Information" />
+
               <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
                 <Panel title="Basic Information">
                   <KV label="User ID" value={String(profile?.userId ?? "")} />
@@ -238,7 +354,8 @@ export default function Page() {
 
                 <Panel title="Badges">
                   <div className="text-white/70 mb-2">
-                    Badge Count: <span className="text-white">{profile?.totalBadges ?? profile?.badges?.length ?? 0}</span>
+                    Badge Count:{" "}
+                    <span className="text-white">{profile?.totalBadges ?? profile?.badges?.length ?? 0}</span>
                   </div>
                   <List items={(profile?.badges ?? []).slice(0, 60).map((b) => b.name)} />
                 </Panel>
@@ -265,6 +382,12 @@ export default function Page() {
 
           {step === "eval" && (
             <div className="space-y-6">
+              {DEBUG && (
+                <pre className="text-xs text-white/70 bg-black/30 p-3 rounded-lg overflow-auto">
+                  {JSON.stringify(evaluation, null, 2)}
+                </pre>
+              )}
+
               <div className="flex items-end justify-between">
                 <h2 className="text-4xl font-bold">Evaluation Report</h2>
                 <div />
@@ -274,18 +397,22 @@ export default function Page() {
                 <Panel title="Risk Evaluation">
                   <div className="flex items-center justify-between">
                     <div className="text-white/70">Risk Level:</div>
+
                     <span className="rounded-full bg-white/10 px-4 py-2 font-semibold">
-                      {evaluation?.level ?? "Low"}
+                      {evaluation?.level ?? "—"}
                     </span>
                   </div>
+
                   <div className="mt-3 text-white/70">Risk Score:</div>
                   <div className="text-2xl font-bold">{evaluation?.score ?? 0}</div>
 
                   <div className="mt-4 text-white/70">Risk Factors:</div>
                   <ul className="mt-2 list-disc pl-6 text-white">
-                    {(evaluation?.factors?.length ? evaluation.factors : ["No specific risk factors detected."]).map((f) => (
-                      <li key={f}>{f}</li>
-                    ))}
+                    {(evaluation?.factors?.length ? evaluation.factors : ["No specific risk factors detected."]).map(
+                      (f) => (
+                        <li key={f}>{f}</li>
+                      )
+                    )}
                   </ul>
                 </Panel>
 
@@ -331,9 +458,16 @@ export default function Page() {
               </Panel>
 
               <div className="flex items-center justify-center gap-4 pt-4">
-                <button className="rounded-lg bg-indigo-600 px-6 py-3 font-semibold hover:bg-indigo-500">
+                <button
+                  className="rounded-lg bg-indigo-600 px-6 py-3 font-semibold hover:bg-indigo-500"
+                  onClick={() => {
+                    const text = JSON.stringify(evaluation ?? {}, null, 2);
+                    navigator.clipboard?.writeText(text).catch(() => {});
+                  }}
+                >
                   Export to Clipboard
                 </button>
+
                 <button
                   className="rounded-lg bg-rose-500 px-6 py-3 font-semibold hover:bg-rose-400"
                   onClick={startOver}
@@ -353,7 +487,7 @@ export default function Page() {
   );
 }
 
-/* ---------------- UI helpers ---------------- */
+/** ---------------- UI helpers ---------------- */
 
 function Stepper({ step }: { step: StepKey }) {
   const idx = STEPS.findIndex((s) => s.key === step);
@@ -381,11 +515,7 @@ function Stepper({ step }: { step: StepKey }) {
 }
 
 function Card({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="rounded-2xl border border-white/10 bg-white/5 p-8 shadow-xl">
-      {children}
-    </div>
-  );
+  return <div className="rounded-2xl border border-white/10 bg-white/5 p-8 shadow-xl">{children}</div>;
 }
 
 function DivisionCard({
@@ -409,9 +539,7 @@ function DivisionCard({
         <div className="h-16 w-16 rounded-2xl bg-white/10 flex items-center justify-center text-3xl font-bold">
           {division.badgeLetter}
         </div>
-        <div className="h-7 w-7 rounded-full bg-indigo-500 flex items-center justify-center text-white">
-          ✓
-        </div>
+        <div className="h-7 w-7 rounded-full bg-indigo-500 flex items-center justify-center text-white">✓</div>
       </div>
 
       <div className="mt-6 text-2xl font-bold">{division.name}</div>
@@ -430,15 +558,7 @@ function SectionTitle({ title }: { title: string }) {
   return <h2 className="text-4xl font-bold">{title}</h2>;
 }
 
-function Panel({
-  title,
-  children,
-  center,
-}: {
-  title: string;
-  children: React.ReactNode;
-  center?: boolean;
-}) {
+function Panel({ title, children, center }: { title: string; children: React.ReactNode; center?: boolean }) {
   return (
     <div className="rounded-2xl bg-[#1b2a57] border border-white/10 p-6 shadow-xl">
       <div className="text-2xl font-semibold text-cyan-300">{title}</div>
@@ -458,9 +578,7 @@ function KV({ label, value }: { label: string; value: string }) {
 }
 
 function List({ items, emptyText }: { items: string[]; emptyText?: string }) {
-  if (!items || items.length === 0) {
-    return <div className="text-white/60">{emptyText ?? "None."}</div>;
-  }
+  if (!items || items.length === 0) return <div className="text-white/60">{emptyText ?? "None."}</div>;
   return (
     <div className="max-h-64 overflow-auto pr-2">
       <ul className="list-disc pl-6 space-y-1">
@@ -472,48 +590,4 @@ function List({ items, emptyText }: { items: string[]; emptyText?: string }) {
       </ul>
     </div>
   );
-}
-
-/* ---------------- Evaluation logic ---------------- */
-
-function computeEvaluation(profile: RobloxProfile, divisionId: DivisionId): Evaluation {
-  // Simple starter scoring (replace with your blacklist / discord checks later)
-  let score = 0;
-  const factors: string[] = [];
-  const warnings: string[] = [];
-
-  const totalBadges = profile.totalBadges ?? profile.badges?.length ?? 0;
-  const freeBadges = (profile.badges ?? []).length; // placeholder
-
-  if (totalBadges > 0) {
-    const pct = (freeBadges / totalBadges) * 100;
-    if (pct >= 20) {
-      score += 12;
-      factors.push(`Moderate percentage of free badges: ${pct.toFixed(1)}%.`);
-    }
-  }
-
-  let level: RiskLevel = "Low";
-  if (score >= 40) level = "High";
-  else if (score >= 20) level = "Medium";
-
-  return {
-    level,
-    score,
-    factors,
-    warnings,
-    blacklistedGroups: [],
-    blacklistedFriends: [],
-    crossDivision: [],
-  };
-}
-
-function formatCreated(created?: string) {
-  if (!created) return "-";
-  // try friendly date
-  const d = new Date(created);
-  if (!isNaN(d.getTime())) {
-    return d.toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" });
-  }
-  return created;
 }
